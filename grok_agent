@@ -1,0 +1,1690 @@
+from typing import TypedDict, Annotated, Optional, Any
+
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph.message import add_messages
+
+from langchain_core.messages import HumanMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_groq import ChatGroq
+
+from pydantic import BaseModel, Field
+
+from dotenv import load_dotenv
+from fastapi import FastAPI
+from datetime import datetime
+
+from AI_Conversacional_TG.API.herramientas import HERRAMIENTAS
+
+import os
+import json
+import time
+
+
+# =====================================================
+# FASTAPI
+# =====================================================
+
+app = FastAPI()
+
+
+# =====================================================
+# CONFIGURACIÓN LLM
+# =====================================================
+
+load_dotenv()
+
+api_key = os.getenv("GROQ_API_KEY")
+
+if not api_key:
+    raise RuntimeError("No se ha encontrado GROQ_API_KEY")
+
+
+llm = ChatGroq(
+    model="openai/gpt-oss-120b",
+    api_key=api_key
+)
+
+
+# =====================================================
+# MEMORIA LANGGRAPH
+# =====================================================
+
+memory = MemorySaver()
+
+
+# =====================================================
+# ESTADO
+# =====================================================
+
+class State(TypedDict):
+
+    messages: Annotated[list, add_messages]
+
+    search_query: str
+
+    plan: dict
+
+    resultado_tools: Any
+
+    parametros_faltantes: list
+
+    # Tokens acumulados de las llamadas LLM
+    input_tokens: int
+
+    output_tokens: int
+
+    # Tokens individuales
+    context_input_tokens: int
+
+    context_output_tokens: int
+
+    planner_input_tokens: int
+
+    planner_output_tokens: int
+
+
+# =====================================================
+# RESOLVER CONTEXTO
+# =====================================================
+
+context_resolver_prompt = ChatPromptTemplate.from_template("""
+Eres un asistente encargado de resolver referencias y
+contexto de una conversación con un ERP.
+
+Tu función NO es ejecutar herramientas.
+
+Tu función es transformar el nuevo mensaje del usuario
+en una consulta completamente independiente para que
+posteriormente otro agente pueda planificar las herramientas.
+
+============================================================
+HISTORIAL DE CONVERSACIÓN
+============================================================
+
+{history}
+
+
+============================================================
+RESULTADO DE LAS HERRAMIENTAS ANTERIORES
+============================================================
+
+{resultado_tools}
+
+
+============================================================
+NUEVO MENSAJE DEL USUARIO
+============================================================
+
+{question}
+
+
+============================================================
+OBJETIVO
+============================================================
+
+Reescribe el nuevo mensaje utilizando la información
+relevante del historial y, especialmente, los resultados
+de herramientas anteriores.
+
+Debes resolver referencias como:
+
+- "el primero"
+- "el segundo"
+- "el tercero"
+- "el último"
+- "el anterior"
+- "el siguiente"
+- "ese pedido"
+- "ese"
+- "ese documento"
+- "descárgalo"
+- "descárgame ese"
+- "cancélalo"
+- "modifícalo"
+- "muéstrame el primero"
+- "haz lo mismo con el siguiente"
+
+
+============================================================
+PRIORIDAD DE LOS RESULTADOS
+============================================================
+
+Cuando exista una referencia a elementos mostrados
+anteriormente, utiliza RESULTADO DE LAS HERRAMIENTAS
+ANTERIORES para resolverla.
+
+NO inventes identificadores.
+
+NO inventes números de pedido.
+
+NO inventes valores que no aparezcan en el contexto.
+
+
+============================================================
+EJEMPLO 1
+============================================================
+
+RESULTADO DE LAS HERRAMIENTAS ANTERIORES:
+
+[
+    {{
+        "numero": "2500002318"
+    }},
+    {{
+        "numero": "2500002320"
+    }},
+    {{
+        "numero": "2500002325"
+    }}
+]
+
+NUEVO MENSAJE:
+
+"Descárgame el segundo"
+
+Debes generar:
+
+"Descarga el pedido 2500002320"
+
+
+============================================================
+EJEMPLO 2
+============================================================
+
+RESULTADO DE LAS HERRAMIENTAS ANTERIORES:
+
+[
+    {{
+        "numero": "2500002318"
+    }},
+    {{
+        "numero": "2500002320"
+    }},
+    {{
+        "numero": "2500002325"
+    }}
+]
+
+NUEVO MENSAJE:
+
+"Descárgame el primero"
+
+Debes generar:
+
+"Descarga el pedido 2500002318"
+
+
+============================================================
+EJEMPLO 3
+============================================================
+
+RESULTADO DE LAS HERRAMIENTAS ANTERIORES:
+
+[
+    {{
+        "numero": "2500002318",
+        "estado": "cerrado"
+    }},
+    {{
+        "numero": "2500002320",
+        "estado": "pendiente"
+    }}
+]
+
+NUEVO MENSAJE:
+
+"Descarga el pendiente"
+
+Debes generar:
+
+"Descarga el pedido 2500002320"
+
+
+============================================================
+EJEMPLO 4
+============================================================
+
+HISTORIAL:
+
+Usuario: Quiero ver mis últimos 3 pedidos.
+
+RESULTADO DE LAS HERRAMIENTAS ANTERIORES:
+
+[
+    {{
+        "numero": "2500002318"
+    }},
+    {{
+        "numero": "2500002320"
+    }},
+    {{
+        "numero": "2500002325"
+    }}
+]
+
+NUEVO MENSAJE:
+
+"Quiero el segundo"
+
+Debes generar:
+
+"Quiero el pedido 2500002320"
+
+
+============================================================
+EJEMPLO 5
+============================================================
+
+HISTORIAL:
+
+Usuario: Quiero ver mis últimos 3 pedidos.
+Asistente: Aquí tienes tus 3 últimos pedidos.
+
+RESULTADO DE LAS HERRAMIENTAS ANTERIORES:
+
+[
+    {{
+        "numero": "2500002318"
+    }},
+    {{
+        "numero": "2500002320"
+    }},
+    {{
+        "numero": "2500002325"
+    }}
+]
+
+NUEVO MENSAJE:
+
+"Descárgalo"
+
+En este caso NO existe suficiente información para saber
+qué elemento concreto quiere el usuario.
+
+No inventes uno.
+
+Debes mantener la ambigüedad en la consulta reescrita.
+
+Por ejemplo:
+
+"Descarga el pedido seleccionado por el usuario"
+
+o una formulación equivalente que permita al planner
+detectar que falta información.
+
+
+============================================================
+REGLAS IMPORTANTES
+============================================================
+
+1. No ejecutes herramientas.
+
+2. No respondas al usuario.
+
+3. No hagas preguntas al usuario.
+
+4. Devuelve únicamente la consulta reescrita.
+
+5. Utiliza únicamente información existente en:
+   - historial
+   - resultado_tools
+   - nuevo mensaje
+
+6. Si una referencia puede resolverse de forma inequívoca,
+   resuélvela.
+
+7. Si una referencia NO puede resolverse de forma inequívoca,
+   no inventes un valor.
+
+8. Conserva la intención original del usuario.
+
+9. No añadas información innecesaria.
+
+10. Si el usuario hace una petición completamente nueva,
+    simplemente reescríbela de forma independiente.
+
+
+============================================================
+SALIDA
+============================================================
+
+Devuelve únicamente la consulta reescrita.
+
+No utilices JSON.
+
+No utilices Markdown.
+
+No añadas explicaciones.
+""")
+
+
+context_resolver_chain = context_resolver_prompt | llm
+
+
+# =====================================================
+# RESOLVER CONTEXTO
+# =====================================================
+
+def context_resolver(state: State):
+
+    # =================================================
+    # HISTORIAL
+    # =================================================
+
+    history = "\n".join(
+        f"{'Usuario' if isinstance(msg, HumanMessage) else 'Asistente'}: {msg.content}"
+        for msg in state["messages"][:-1]
+    )
+
+
+    # =================================================
+    # MENSAJE ACTUAL
+    # =================================================
+
+    question = state["messages"][-1].content
+
+
+    # =================================================
+    # RESULTADOS ANTERIORES
+    # =================================================
+
+    resultado_tools = state.get(
+        "resultado_tools",
+        []
+    )
+
+
+    # =================================================
+    # INVOCAR MODELO
+    # =================================================
+
+    response = context_resolver_chain.invoke({
+
+        "history":
+            history,
+
+        "question":
+            question,
+
+        "resultado_tools":
+            json.dumps(
+                resultado_tools,
+                ensure_ascii=False
+            )
+    })
+
+
+    # =================================================
+    # TOKENS
+    # =================================================
+
+    usage = getattr(
+        response,
+        "usage_metadata",
+        {}
+    ) or {}
+
+
+    context_input_tokens = usage.get(
+        "input_tokens",
+        0
+    )
+
+
+    context_output_tokens = usage.get(
+        "output_tokens",
+        0
+    )
+
+
+    # =================================================
+    # CONSULTA REESCRITA
+    # =================================================
+
+    consulta_reescrita = response.content.strip()
+
+
+    # =================================================
+    # DEVOLVER ESTADO
+    # =================================================
+
+    return {
+
+        "search_query":
+            consulta_reescrita,
+
+        "input_tokens":
+            context_input_tokens,
+
+        "output_tokens":
+            context_output_tokens,
+
+        "context_input_tokens":
+            context_input_tokens,
+
+        "context_output_tokens":
+            context_output_tokens,
+
+        "planner_input_tokens":
+            0,
+
+        "planner_output_tokens":
+            0
+    }
+
+
+# =====================================================
+# MODELO PLAN
+# =====================================================
+
+class Plan(BaseModel):
+
+    herramientas: list[str] = Field(
+        description="Herramientas que deben ejecutarse."
+    )
+
+    parametros: dict[str, dict[str, Any]] = Field(
+        description="Parámetros agrupados por herramienta."
+    )
+
+    parametros_a_pedir: list[str] = Field(
+        description="Parámetros obligatorios o ambiguos que faltan."
+    )
+
+    respuesta_usuario: Optional[str] = Field(
+        default=None,
+        description="Pregunta al usuario si falta información."
+    )
+
+
+# =====================================================
+# PROMPT PLANNER
+# =====================================================
+
+planner_prompt = ChatPromptTemplate.from_template("""
+Eres el PLANIFICADOR de un asistente conectado a un ERP.
+
+NO ejecutes herramientas ni realices acciones.
+
+Analiza la consulta y devuelve ÚNICAMENTE un objeto JSON
+con el plan.
+
+
+============================================================
+HERRAMIENTAS DISPONIBLES
+============================================================
+
+{herramientas}
+
+
+============================================================
+FECHA ACTUAL
+============================================================
+
+{fecha_actual}
+
+
+============================================================
+CONSULTA
+============================================================
+
+{question}
+
+
+============================================================
+RESULTADO DE LAS HERRAMIENTAS ANTERIORES
+============================================================
+
+{resultado_tools}
+
+
+============================================================
+ESTRUCTURA OBLIGATORIA
+============================================================
+
+Siempre devuelve exactamente:
+
+{{
+    "herramientas": [],
+    "parametros": {{}},
+    "parametros_a_pedir": [],
+    "respuesta_usuario": null
+}}
+
+
+============================================================
+1. CONVERSACIÓN NORMAL
+============================================================
+
+Si la consulta no requiere ninguna herramienta del ERP
+(saludos, despedidas, agradecimientos, conversación general,
+etc.):
+
+- herramientas = []
+- parametros = {{}}
+- parametros_a_pedir = []
+- respuesta_usuario = respuesta natural y breve
+
+Ejemplos:
+
+"Hola"
+
+→
+
+respuesta_usuario:
+"¡Hola! ¿En qué puedo ayudarte?"
+
+
+"¿Cómo estás?"
+
+→
+
+respuesta_usuario:
+"¡Muy bien! ¿En qué puedo ayudarte?"
+
+
+"Gracias"
+
+→
+
+respuesta_usuario:
+"¡De nada! ¿Necesitas algo más?"
+
+
+No inventes herramientas para estas consultas.
+
+
+============================================================
+2. HERRAMIENTAS
+============================================================
+
+Utiliza ÚNICAMENTE las herramientas definidas en
+HERRAMIENTAS.
+
+Identifica siempre las herramientas como:
+
+"dominio.herramienta"
+
+Ejemplo:
+
+[
+    "pedidos.buscar_pedidos",
+    "pedidos.visualizar_pedidos"
+]
+
+No inventes herramientas.
+
+No inventes parámetros.
+
+No inventes valores.
+
+No mezcles herramientas de diferentes dominios.
+
+
+============================================================
+3. PARÁMETROS
+============================================================
+
+Los parámetros deben agruparse por herramienta.
+
+Ejemplo:
+
+{{
+    "pedidos.buscar_pedidos": {{
+        "cantidad": 5,
+        "estado": "cerrado"
+    }}
+}}
+
+Los parámetros opcionales pueden omitirse.
+
+Si una herramienta no necesita parámetros:
+
+{{
+    "pedidos.visualizar_pedidos": {{}}
+}}
+
+
+============================================================
+4. PARÁMETROS OBLIGATORIOS Y AMBIGÜEDADES
+============================================================
+
+Si falta un parámetro obligatorio O existe una ambigüedad
+que impide saber qué valor utilizar:
+
+- NO ejecutes herramientas.
+- Añade el dato a "parametros_a_pedir".
+- Pregunta únicamente lo necesario en "respuesta_usuario".
+- NO elijas un valor arbitrariamente.
+- NO supongas qué opción quiere el usuario.
+
+Si el usuario responde posteriormente a una pregunta,
+utiliza el historial para completar el parámetro pendiente.
+
+
+============================================================
+5. IMPORTES — REGLA PRIORITARIA
+============================================================
+
+ESTA REGLA TIENE PRIORIDAD SOBRE CUALQUIER OTRA REGLA
+DE INTERPRETACIÓN DE PARÁMETROS.
+
+La herramienta de pedidos dispone de DOS tipos de importe:
+
+- importe_total
+- importe_base
+
+Si el usuario dice explícitamente:
+
+"importe total"
+
+→ utiliza:
+
+"importe_total"
+
+
+Si el usuario dice explícitamente:
+
+"importe base"
+
+→ utiliza:
+
+"importe_base"
+
+
+MUY IMPORTANTE:
+
+Si el usuario dice únicamente:
+
+"importe"
+
+"con un importe de X"
+
+"pedidos por importe de X euros"
+
+"pedidos cuyo importe sea X"
+
+y NO especifica "total" ni "base":
+
+NO puedes decidir si se refiere a importe_total
+o importe_base.
+
+Debes pedir aclaración.
+
+
+Ejemplo:
+
+Usuario:
+
+"quiero ver mis últimos dos pedidos del año pasado
+con un importe de 200 euros"
+
+
+DEBES generar:
+
+{{
+    "herramientas": [],
+    "parametros": {{
+        "pedidos.buscar_pedidos": {{
+            "cantidad": 2,
+            "importe": 200,
+            "fecha_desde": "2025-01-01",
+            "fecha_hasta": "2025-12-31",
+            "orden": "fecha_desc"
+        }}
+    }},
+    "parametros_a_pedir": [
+        "tipo_importe"
+    ],
+    "respuesta_usuario":
+        "¿Quieres filtrar por importe total o por importe base?"
+}}
+
+
+NO debes generar:
+
+"importe_total": 200
+
+ni:
+
+"importe_base": 200
+
+
+porque el usuario no ha especificado el tipo.
+
+El valor numérico SIEMPRE debe conservarse como:
+
+"importe": 200
+
+hasta que el usuario aclare el tipo.
+
+
+Cuando el usuario responda:
+
+"importe total"
+
+debes completar:
+
+{{
+    "herramientas": [
+        "pedidos.buscar_pedidos"
+    ],
+    "parametros": {{
+        "pedidos.buscar_pedidos": {{
+            "cantidad": 2,
+            "importe_total": 200,
+            "fecha_desde": "2025-01-01",
+            "fecha_hasta": "2025-12-31",
+            "orden": "fecha_desc"
+        }}
+    }},
+    "parametros_a_pedir": [],
+    "respuesta_usuario": null
+}}
+
+
+============================================================
+6. DEPENDENCIAS ENTRE HERRAMIENTAS
+============================================================
+
+Si una herramienta necesita el resultado de otra,
+indícalo mediante:
+
+"<resultado_de_nombre_herramienta>"
+
+
+Ejemplo:
+
+{{
+    "pedidos.buscar_pedidos": {{
+        "cantidad": 5
+    }},
+    "pedidos.visualizar_pedidos": {{
+        "resultado": "<resultado_de_pedidos.buscar_pedidos>"
+    }}
+}}
+
+
+============================================================
+7. ORDEN
+============================================================
+
+Utiliza SOLO estos valores:
+
+- fecha_asc
+- fecha_desc
+- numero_asc
+- numero_desc
+
+
+Si el usuario no indica orden,
+no incluyas el parámetro.
+
+
+Si indica:
+
+"últimos pedidos"
+
+interpreta normalmente como:
+
+"orden": "fecha_desc"
+
+
+============================================================
+8. FECHAS
+============================================================
+
+Todas las fechas deben devolverse como:
+
+YYYY-MM-DD
+
+
+Convierte expresiones relativas utilizando FECHA ACTUAL.
+
+
+Ejemplos:
+
+"hoy"
+
+→ fecha actual
+
+
+"ayer"
+
+→ día anterior
+
+
+"últimas dos semanas"
+
+→ rango correspondiente
+
+
+"año pasado"
+
+→
+
+fecha_desde:
+01/01/AAAA
+
+fecha_hasta:
+31/12/AAAA
+
+
+Nunca devuelvas expresiones relativas.
+
+
+============================================================
+9. LISTAS
+============================================================
+
+Si un parámetro admite varios valores,
+utiliza un array.
+
+
+Ejemplo:
+
+{{
+    "nombre_articulos": [
+        "balletas amarillas",
+        "balletas azules"
+    ]
+}}
+
+
+============================================================
+10. RESPUESTA
+============================================================
+
+Si se necesitan herramientas y NO falta información:
+
+"respuesta_usuario": null
+
+
+Si faltan datos o existe una ambigüedad:
+
+"respuesta_usuario": pregunta concreta al usuario
+
+
+Si es conversación normal:
+
+"respuesta_usuario": respuesta conversacional breve
+
+
+No ejecutes acciones.
+
+No describas resultados de herramientas.
+
+
+============================================================
+11. REFERENCIAS A RESULTADOS ANTERIORES
+============================================================
+
+La consulta puede contener referencias que ya hayan sido
+resueltas por el RESOLVEDOR DE CONTEXTO.
+
+Por ejemplo:
+
+"Descarga el pedido 2500002320"
+
+En ese caso debes utilizar:
+
+"2500002320"
+
+como parámetro de la herramienta correspondiente.
+
+
+Si la consulta contiene una referencia que sigue siendo
+ambigua y no existe información suficiente para resolverla:
+
+- NO inventes un valor.
+- Añade el parámetro correspondiente a
+  "parametros_a_pedir".
+- Pregunta al usuario.
+
+
+============================================================
+IMPORTANTE
+============================================================
+
+Devuelve SOLO JSON válido.
+
+NO devuelvas:
+
+- fecha_hora
+- error
+- tiempo
+- consulta_original
+- consulta_reescrita
+- explicaciones
+- markdown
+""")
+
+
+# =====================================================
+# CHAIN PLANNER
+# =====================================================
+
+planner_chain = planner_prompt | llm
+
+
+# =====================================================
+# PLANNER
+# =====================================================
+
+def planner(state: State):
+
+    response = planner_chain.invoke({
+
+        "herramientas":
+            json.dumps(
+                HERRAMIENTAS,
+                ensure_ascii=False
+            ),
+
+        "question":
+            state["search_query"],
+
+        "fecha_actual":
+            datetime.now().strftime("%Y-%m-%d"),
+
+        "resultado_tools":
+            json.dumps(
+                state.get(
+                    "resultado_tools",
+                    []
+                ),
+                ensure_ascii=False
+            )
+    })
+
+
+    # =================================================
+    # TOKENS
+    # =================================================
+
+    usage = getattr(
+        response,
+        "usage_metadata",
+        {}
+    ) or {}
+
+
+    planner_input_tokens = usage.get(
+        "input_tokens",
+        0
+    )
+
+
+    planner_output_tokens = usage.get(
+        "output_tokens",
+        0
+    )
+
+
+    # =================================================
+    # CONTENIDO
+    # =================================================
+
+    contenido = response.content.strip()
+
+
+    # =================================================
+    # LIMPIAR MARKDOWN
+    # =================================================
+
+    if "```json" in contenido:
+
+        contenido = contenido.split(
+            "```json",
+            1
+        )[1]
+
+        contenido = contenido.split(
+            "```",
+            1
+        )[0]
+
+    elif "```" in contenido:
+
+        contenido = contenido.split(
+            "```",
+            1
+        )[1]
+
+        contenido = contenido.split(
+            "```",
+            1
+        )[0]
+
+
+    contenido = contenido.strip()
+
+
+    # =================================================
+    # PARSEAR JSON
+    # =================================================
+
+    try:
+
+        datos = json.loads(
+            contenido
+        )
+
+    except json.JSONDecodeError as e:
+
+        raise ValueError(
+
+            "El planner no devolvió JSON válido.\n\n"
+
+            f"Error: {e}\n\n"
+
+            f"Respuesta del modelo:\n"
+            f"{contenido}"
+        )
+
+
+    # =================================================
+    # VALIDAR PLAN
+    # =================================================
+
+    try:
+
+        plan = Plan.model_validate(datos)
+
+    except Exception as e:
+
+        raise ValueError(
+
+            "El planner devolvió un plan inválido.\n\n"
+
+            f"Error: {e}\n\n"
+
+            "JSON recibido:\n"
+
+            f"{json.dumps(datos, ensure_ascii=False, indent=2)}"
+        )
+
+
+    # =================================================
+    # TOKENS TOTALES
+    # =================================================
+
+    context_input_tokens = state.get(
+        "context_input_tokens",
+        0
+    )
+
+    context_output_tokens = state.get(
+        "context_output_tokens",
+        0
+    )
+
+
+    total_input_tokens = (
+        context_input_tokens
+        +
+        planner_input_tokens
+    )
+
+
+    total_output_tokens = (
+        context_output_tokens
+        +
+        planner_output_tokens
+    )
+
+
+    # =================================================
+    # DEVOLVER ESTADO
+    # =================================================
+
+    return {
+
+        "plan":
+            plan.model_dump(),
+
+        "parametros_faltantes":
+            plan.parametros_a_pedir,
+
+        # Totales
+        "input_tokens":
+            total_input_tokens,
+
+        "output_tokens":
+            total_output_tokens,
+
+        # Tokens individuales
+        "context_input_tokens":
+            context_input_tokens,
+
+        "context_output_tokens":
+            context_output_tokens,
+
+        "planner_input_tokens":
+            planner_input_tokens,
+
+        "planner_output_tokens":
+            planner_output_tokens
+    }
+
+
+# =====================================================
+# GRAFO
+# =====================================================
+
+graph = StateGraph(
+    State
+)
+
+
+# =====================================================
+# NODOS
+# =====================================================
+
+graph.add_node(
+    "context_resolver",
+    context_resolver
+)
+
+graph.add_node(
+    "planner",
+    planner
+)
+
+
+# =====================================================
+# FLUJO
+# =====================================================
+
+graph.add_edge(
+    START,
+    "context_resolver"
+)
+
+graph.add_edge(
+    "context_resolver",
+    "planner"
+)
+
+
+graph.add_edge(
+    "planner",
+    END
+)
+
+
+# =====================================================
+# COMPILAR
+# =====================================================
+
+graph_app = graph.compile(
+    checkpointer=memory
+)
+
+
+# =====================================================
+# REQUEST / PLAN
+# =====================================================
+
+class PlanRequest(BaseModel):
+
+    text: str
+
+    thread_id: str
+
+
+# =====================================================
+# REQUEST / MEMORY
+# =====================================================
+
+class MemoryRequest(BaseModel):
+
+    thread_id: str
+
+    resultado_tools: Any
+
+
+# =====================================================
+# ENDPOINT /memory
+# =====================================================
+
+@app.post("/memory")
+def guardar_resultado_memoria(
+    data: MemoryRequest
+):
+
+    try:
+
+        # =============================================
+        # CONFIGURACIÓN DEL THREAD
+        # =============================================
+
+        config = {
+
+            "configurable": {
+
+                "thread_id":
+                    data.thread_id
+            }
+        }
+
+
+        # =============================================
+        # GUARDAR RESULTADO
+        # =============================================
+
+        graph_app.update_state(
+
+            config,
+
+            {
+
+                "resultado_tools":
+                    data.resultado_tools
+            }
+        )
+
+
+        # =============================================
+        # COMPROBAR QUE SE HA GUARDADO
+        # =============================================
+
+        estado = graph_app.get_state(
+            config
+        )
+
+
+        return {
+
+            "ok":
+                True,
+
+            "thread_id":
+                data.thread_id,
+
+            "resultado_tools":
+                estado.values.get(
+                    "resultado_tools",
+                    []
+                )
+        }
+
+
+    except Exception as e:
+
+        return {
+
+            "ok":
+                False,
+
+            "thread_id":
+                data.thread_id,
+
+            "error":
+                str(e)
+        }
+
+
+# =====================================================
+# ENDPOINT /plan
+# =====================================================
+
+@app.post("/plan")
+def create_plan(
+    data: PlanRequest
+):
+
+    inicio = time.perf_counter()
+
+
+    try:
+
+        # =============================================
+        # CONFIGURACIÓN
+        # =============================================
+
+        config = {
+
+            "configurable": {
+
+                "thread_id":
+                    data.thread_id
+            }
+        }
+
+
+        # =============================================
+        # EJECUTAR GRAFO
+        # =============================================
+
+        resultado = graph_app.invoke(
+
+            {
+
+                "messages": [
+
+                    HumanMessage(
+                        content=data.text
+                    )
+                ]
+            },
+
+            config=config
+        )
+
+
+        # =============================================
+        # TIEMPO
+        # =============================================
+
+        tiempo = round(
+
+            time.perf_counter()
+            - inicio,
+
+            3
+        )
+
+
+        # =============================================
+        # PLAN
+        # =============================================
+
+        plan = resultado.get(
+
+            "plan",
+
+            {}
+        )
+
+
+        # =============================================
+        # PARÁMETROS FALTANTES
+        # =============================================
+
+        parametros_faltantes = resultado.get(
+
+            "parametros_faltantes",
+
+            []
+        )
+
+
+        # =============================================
+        # CONSULTA REESCRITA
+        # =============================================
+
+        consulta_reescrita = resultado.get(
+
+            "search_query",
+
+            ""
+        )
+
+
+        # =============================================
+        # TOKENS
+        # =============================================
+
+        context_input_tokens = resultado.get(
+            "context_input_tokens",
+            0
+        )
+
+        context_output_tokens = resultado.get(
+            "context_output_tokens",
+            0
+        )
+
+        planner_input_tokens = resultado.get(
+            "planner_input_tokens",
+            0
+        )
+
+        planner_output_tokens = resultado.get(
+            "planner_output_tokens",
+            0
+        )
+
+        total_input_tokens = resultado.get(
+            "input_tokens",
+            0
+        )
+
+        total_output_tokens = resultado.get(
+            "output_tokens",
+            0
+        )
+
+        total_tokens = (
+            total_input_tokens
+            +
+            total_output_tokens
+        )
+
+
+        # =============================================
+        # RESPUESTA FINAL
+        # =============================================
+
+        respuesta = {
+
+            "fecha_hora":
+
+                datetime.now().strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                ),
+
+            "error":
+
+                False,
+
+            "tiempo":
+
+                tiempo,
+
+            "consulta_original":
+
+                data.text,
+
+            "consulta_reescrita":
+
+                consulta_reescrita,
+
+            "plan":
+
+                plan,
+
+            "parametros_a_pedir":
+
+                parametros_faltantes,
+
+            # =========================================
+            # TOKENS
+            # =========================================
+
+            "tokens":
+
+                {
+
+                    "context_resolver":
+
+                        {
+
+                            "input":
+                                context_input_tokens,
+
+                            "output":
+                                context_output_tokens,
+
+                            "total":
+                                (
+                                    context_input_tokens
+                                    +
+                                    context_output_tokens
+                                )
+                        },
+
+
+                    "planner":
+
+                        {
+
+                            "input":
+                                planner_input_tokens,
+
+                            "output":
+                                planner_output_tokens,
+
+                            "total":
+                                (
+                                    planner_input_tokens
+                                    +
+                                    planner_output_tokens
+                                )
+                        },
+
+
+                    "total":
+
+                        {
+
+                            "input":
+                                total_input_tokens,
+
+                            "output":
+                                total_output_tokens,
+
+                            "total":
+                                total_tokens
+                        }
+                }
+        }
+
+
+        # =============================================
+        # GUARDAR LOG
+        # =============================================
+
+        ruta_archivo = os.path.join(
+
+            os.path.dirname(
+                os.path.abspath(__file__)
+            ),
+
+            "respuestas.txt"
+        )
+
+
+        with open(
+
+            ruta_archivo,
+
+            "a",
+
+            encoding="utf-8"
+
+        ) as archivo:
+
+            archivo.write(
+
+                json.dumps(
+
+                    respuesta,
+
+                    ensure_ascii=False
+
+                ) + "\n"
+            )
+
+
+        # =============================================
+        # DEVOLVER
+        # =============================================
+
+        return respuesta
+
+
+    except Exception as e:
+
+        # =============================================
+        # TIEMPO
+        # =============================================
+
+        tiempo = round(
+
+            time.perf_counter()
+            - inicio,
+
+            3
+        )
+
+
+        # =============================================
+        # RESPUESTA ERROR
+        # =============================================
+
+        respuesta_error = {
+
+            "fecha_hora":
+
+                datetime.now().strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                ),
+
+            "error":
+
+                True,
+
+            "tiempo":
+
+                tiempo,
+
+            "mensaje":
+
+                str(e)
+        }
+
+
+        # =============================================
+        # GUARDAR ERROR
+        # =============================================
+
+        ruta_archivo = os.path.join(
+
+            os.path.dirname(
+                os.path.abspath(__file__)
+            ),
+
+            "respuestas.txt"
+        )
+
+
+        with open(
+
+            ruta_archivo,
+
+            "a",
+
+            encoding="utf-8"
+
+        ) as archivo:
+
+            archivo.write(
+
+                json.dumps(
+
+                    respuesta_error,
+
+                    ensure_ascii=False
+
+                ) + "\n"
+            )
+
+
+        # =============================================
+        # DEVOLVER ERROR
+        # =============================================
+
+        return respuesta_error
