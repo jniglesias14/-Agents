@@ -50,37 +50,46 @@ llm = ChatGroq(
 # MEMORIA LANGGRAPH
 # =====================================================
 
-memory = MemorySaver()
+memory = MemorySaver() #guardamos en la memoria ram
 
 
 # =====================================================
 # ESTADO
 # =====================================================
 
-class State(TypedDict):
+class State(TypedDict, total=False):
 
-    messages: Annotated[list, add_messages]
+    messages: Annotated[list, add_messages] #se guardan los mensajes(quiero crear un pedido, transferencia, calle mayor 10)
 
-    search_query: str
+    search_query: str #guarda la consulta reescrita
 
-    plan: dict
+    plan: dict #guarda el plan generado
 
-    resultado_tools: Any
+    resultado_tools: Any #guarda el resultado de las herramientas ejecutadas anteriormente.
 
+    # Parámetros que todavía faltan
     parametros_faltantes: list
 
-    # Tokens acumulados de las llamadas LLM
-    input_tokens: int
+    # Parámetros que ya ha proporcionado el usuario
+    parametros_recopilados: dict
 
+    # Parámetro que estamos preguntando actualmente
+    parametro_actual: Optional[str]
+
+    # Indica si estamos esperando una respuesta del usuario
+    esperando_parametro: bool
+
+    # Pregunta que se devuelve al usuario
+    respuesta_parametro: Optional[str] #la pregunta que tiene que mostrar al usuario( que forma de pago quieres utilizar)
+
+    # Tokens
+    input_tokens: int
     output_tokens: int
 
-    # Tokens individuales
     context_input_tokens: int
-
     context_output_tokens: int
 
     planner_input_tokens: int
-
     planner_output_tokens: int
 
 
@@ -124,7 +133,7 @@ OBJETIVO
 ============================================================
 
 Reescribe el nuevo mensaje utilizando la información
-relevante del historial y, especialmente, los resultados
+relevante del historial y especialmente los resultados
 de herramientas anteriores.
 
 Debes resolver referencias como:
@@ -137,212 +146,102 @@ Debes resolver referencias como:
 - "el siguiente"
 - "ese pedido"
 - "ese"
-- "ese documento"
+- "esa forma de pago"
+- "esa dirección"
 - "descárgalo"
 - "descárgame ese"
 - "cancélalo"
 - "modifícalo"
 - "muéstrame el primero"
-- "haz lo mismo con el siguiente"
-
 
 ============================================================
-PRIORIDAD DE LOS RESULTADOS
+NUEVA OPERACIÓN
 ============================================================
 
-Cuando exista una referencia a elementos mostrados
-anteriormente, utiliza RESULTADO DE LAS HERRAMIENTAS
-ANTERIORES para resolverla.
+Si el usuario inicia explícitamente una nueva operación,
+por ejemplo:
 
-NO inventes identificadores.
+- "créame un nuevo pedido"
+- "quiero crear otro pedido"
+- "haz un nuevo pedido"
+- "quiero realizar otro pedido"
 
-NO inventes números de pedido.
+NO reutilices automáticamente parámetros de operaciones
+anteriores.
 
-NO inventes valores que no aparezcan en el contexto.
+En estos casos debes tratar la petición como una nueva
+operación independiente.
 
+NO copies automáticamente:
 
-============================================================
-EJEMPLO 1
-============================================================
+- forma_pago
+- direccion_envio
+- articulos
+- cliente
+- importe
+- ni ningún otro parámetro
 
-RESULTADO DE LAS HERRAMIENTAS ANTERIORES:
+de operaciones anteriores.
 
-[
-    {{
-        "numero": "2500002318"
-    }},
-    {{
-        "numero": "2500002320"
-    }},
-    {{
-        "numero": "2500002325"
-    }}
-]
-
-NUEVO MENSAJE:
-
-"Descárgame el segundo"
-
-Debes generar:
-
-"Descarga el pedido 2500002320"
-
-
-============================================================
-EJEMPLO 2
-============================================================
-
-RESULTADO DE LAS HERRAMIENTAS ANTERIORES:
-
-[
-    {{
-        "numero": "2500002318"
-    }},
-    {{
-        "numero": "2500002320"
-    }},
-    {{
-        "numero": "2500002325"
-    }}
-]
-
-NUEVO MENSAJE:
-
-"Descárgame el primero"
-
-Debes generar:
-
-"Descarga el pedido 2500002318"
-
-
-============================================================
-EJEMPLO 3
-============================================================
-
-RESULTADO DE LAS HERRAMIENTAS ANTERIORES:
-
-[
-    {{
-        "numero": "2500002318",
-        "estado": "cerrado"
-    }},
-    {{
-        "numero": "2500002320",
-        "estado": "pendiente"
-    }}
-]
-
-NUEVO MENSAJE:
-
-"Descarga el pendiente"
-
-Debes generar:
-
-"Descarga el pedido 2500002320"
-
-
-============================================================
-EJEMPLO 4
-============================================================
-
-HISTORIAL:
-
-Usuario: Quiero ver mis últimos 3 pedidos.
-
-RESULTADO DE LAS HERRAMIENTAS ANTERIORES:
-
-[
-    {{
-        "numero": "2500002318"
-    }},
-    {{
-        "numero": "2500002320"
-    }},
-    {{
-        "numero": "2500002325"
-    }}
-]
-
-NUEVO MENSAJE:
-
-"Quiero el segundo"
-
-Debes generar:
-
-"Quiero el pedido 2500002320"
-
-
-============================================================
-EJEMPLO 5
-============================================================
-
-HISTORIAL:
-
-Usuario: Quiero ver mis últimos 3 pedidos.
-Asistente: Aquí tienes tus 3 últimos pedidos.
-
-RESULTADO DE LAS HERRAMIENTAS ANTERIORES:
-
-[
-    {{
-        "numero": "2500002318"
-    }},
-    {{
-        "numero": "2500002320"
-    }},
-    {{
-        "numero": "2500002325"
-    }}
-]
-
-NUEVO MENSAJE:
-
-"Descárgalo"
-
-En este caso NO existe suficiente información para saber
-qué elemento concreto quiere el usuario.
-
-No inventes uno.
-
-Debes mantener la ambigüedad en la consulta reescrita.
+Solo reutiliza información de una operación anterior si
+el usuario lo solicita explícitamente.
 
 Por ejemplo:
 
-"Descarga el pedido seleccionado por el usuario"
+"créame otro igual que el anterior"
 
-o una formulación equivalente que permita al planner
-detectar que falta información.
+sí permite reutilizar los datos del pedido anterior.
+
+Pero:
+
+"créame un nuevo pedido"
+
+NO permite reutilizarlos.
 
 
 ============================================================
-REGLAS IMPORTANTES
+REGLAS
 ============================================================
 
 1. No ejecutes herramientas.
 
 2. No respondas al usuario.
 
-3. No hagas preguntas al usuario.
+3. No hagas preguntas.
 
 4. Devuelve únicamente la consulta reescrita.
 
-5. Utiliza únicamente información existente en:
+5. No inventes identificadores.
+
+6. No inventes valores.
+
+7. Utiliza únicamente información existente en:
    - historial
    - resultado_tools
    - nuevo mensaje
 
-6. Si una referencia puede resolverse de forma inequívoca,
+8. Si una referencia puede resolverse inequívocamente,
    resuélvela.
 
-7. Si una referencia NO puede resolverse de forma inequívoca,
-   no inventes un valor.
+9. Si no puede resolverse inequívocamente,
+   conserva la ambigüedad.
 
-8. Conserva la intención original del usuario.
+10. Si el usuario proporciona simplemente un valor como:
 
-9. No añadas información innecesaria.
+    "transferencia"
 
-10. Si el usuario hace una petición completamente nueva,
-    simplemente reescríbela de forma independiente.
+    "la dirección de Valladolid"
+
+    "Madrid"
+
+    "sí"
+
+    etc.
+
+    conserva exactamente la información proporcionada.
+
+11. Si el mensaje corresponde a una respuesta a una pregunta
+    anterior del asistente, NO cambies su significado.
 
 
 ============================================================
@@ -366,7 +265,14 @@ context_resolver_chain = context_resolver_prompt | llm
 # RESOLVER CONTEXTO
 # =====================================================
 
-def context_resolver(state: State):
+def context_resolver(state: State):  #recibe el estado actual y resuelve el contexto reescribiendo la consulta
+
+    messages = state.get("messages", [])
+
+    if not messages:
+        return {
+            "search_query": ""
+        }
 
     # =================================================
     # HISTORIAL
@@ -374,16 +280,14 @@ def context_resolver(state: State):
 
     history = "\n".join(
         f"{'Usuario' if isinstance(msg, HumanMessage) else 'Asistente'}: {msg.content}"
-        for msg in state["messages"][:-1]
+        for msg in messages[:-1]
     )
-
 
     # =================================================
     # MENSAJE ACTUAL
     # =================================================
 
-    question = state["messages"][-1].content
-
+    question = messages[-1].content
 
     # =================================================
     # RESULTADOS ANTERIORES
@@ -393,7 +297,6 @@ def context_resolver(state: State):
         "resultado_tools",
         []
     )
-
 
     # =================================================
     # INVOCAR MODELO
@@ -414,7 +317,6 @@ def context_resolver(state: State):
             )
     })
 
-
     # =================================================
     # TOKENS
     # =================================================
@@ -425,18 +327,15 @@ def context_resolver(state: State):
         {}
     ) or {}
 
-
     context_input_tokens = usage.get(
         "input_tokens",
         0
     )
 
-
     context_output_tokens = usage.get(
         "output_tokens",
         0
     )
-
 
     # =================================================
     # CONSULTA REESCRITA
@@ -444,21 +343,14 @@ def context_resolver(state: State):
 
     consulta_reescrita = response.content.strip()
 
-
     # =================================================
-    # DEVOLVER ESTADO
+    # DEVOLVER
     # =================================================
 
     return {
 
         "search_query":
             consulta_reescrita,
-
-        "input_tokens":
-            context_input_tokens,
-
-        "output_tokens":
-            context_output_tokens,
 
         "context_input_tokens":
             context_input_tokens,
@@ -470,7 +362,13 @@ def context_resolver(state: State):
             0,
 
         "planner_output_tokens":
-            0
+            0,
+
+        "input_tokens":
+            context_input_tokens,
+
+        "output_tokens":
+            context_output_tokens
     }
 
 
@@ -478,10 +376,10 @@ def context_resolver(state: State):
 # MODELO PLAN
 # =====================================================
 
-class Plan(BaseModel):
+class Plan(BaseModel): #define como debe ser el resultado del planner
 
     herramientas: list[str] = Field(
-        description="Herramientas que deben ejecutarse."
+        description="Herramientas necesarias para completar la petición."
     )
 
     parametros: dict[str, dict[str, Any]] = Field(
@@ -489,12 +387,12 @@ class Plan(BaseModel):
     )
 
     parametros_a_pedir: list[str] = Field(
-        description="Parámetros obligatorios o ambiguos que faltan."
+        description="Parámetros que todavía faltan."
     )
 
     respuesta_usuario: Optional[str] = Field(
         default=None,
-        description="Pregunta al usuario si falta información."
+        description="Pregunta que debe realizarse al usuario."
     )
 
 
@@ -505,46 +403,24 @@ class Plan(BaseModel):
 planner_prompt = ChatPromptTemplate.from_template("""
 Eres el PLANIFICADOR de un asistente conectado a un ERP.
 
-NO ejecutes herramientas ni realices acciones.
-
-Analiza la consulta y devuelve ÚNICAMENTE un objeto JSON
-con el plan.
-
-
-============================================================
-HERRAMIENTAS DISPONIBLES
-============================================================
-
-{herramientas}
-
+Tu única función es analizar la petición del usuario y construir el plan de
+herramientas necesario para resolverla. NO ejecutes herramientas. NO respondas
+directamente al usuario. Devuelve ÚNICAMENTE JSON válido, sin Markdown ni texto
+fuera del JSON.
 
 ============================================================
-FECHA ACTUAL
+CONTEXTO DISPONIBLE
 ============================================================
-
-{fecha_actual}
-
-
-============================================================
-CONSULTA
-============================================================
-
-{question}
-
+Herramientas: {herramientas}
+Fecha actual: {fecha_actual}
+Consulta del usuario: {question}
+Resultado de herramientas anteriores: {resultado_tools}
+Parámetros ya recopilados: {parametros_recopilados}
+Parámetro que se está preguntando actualmente: {parametro_actual}
 
 ============================================================
-RESULTADO DE LAS HERRAMIENTAS ANTERIORES
+FORMATO DE SALIDA (SIEMPRE estos 4 campos)
 ============================================================
-
-{resultado_tools}
-
-
-============================================================
-ESTRUCTURA OBLIGATORIA
-============================================================
-
-Siempre devuelve exactamente:
-
 {{
     "herramientas": [],
     "parametros": {{}},
@@ -552,420 +428,306 @@ Siempre devuelve exactamente:
     "respuesta_usuario": null
 }}
 
+- "herramientas": lista ORDENADA (orden de ejecución) de las herramientas necesarias.
+- "parametros": diccionario {{herramienta: {{parametro: valor}}}}.
+- "parametros_a_pedir": parámetros OBLIGATORIOS que aún faltan.
+- "respuesta_usuario": pregunta para pedir el PRIMER parámetro de "parametros_a_pedir".
+  Si no falta nada: "parametros_a_pedir": [] y "respuesta_usuario": null.
 
 ============================================================
-1. CONVERSACIÓN NORMAL
+1. OBLIGATORIOS vs OPCIONALES
 ============================================================
+Respeta estrictamente el campo "obligatorio" de cada parámetro.
 
-Si la consulta no requiere ninguna herramienta del ERP
-(saludos, despedidas, agradecimientos, conversación general,
-etc.):
+OBLIGATORIO (true) y sin valor disponible:
+1. La herramienta va en "herramientas".
+2. El parámetro va en "parametros_a_pedir".
+3. Se pregunta al usuario — pero solo UNO por turno (el primero de la lista).
 
-- herramientas = []
-- parametros = {{}}
-- parametros_a_pedir = []
-- respuesta_usuario = respuesta natural y breve
+Antes de preguntar, comprueba si el valor puede obtenerse de: la petición
+directa, una deducción inequívoca, el contexto, parámetros ya recopilados, o
+resultados de herramientas anteriores. Si es así, NO preguntes.
 
-Ejemplos:
-
-"Hola"
-
-→
-
-respuesta_usuario:
-"¡Hola! ¿En qué puedo ayudarte?"
-
-
-"¿Cómo estás?"
-
-→
-
-respuesta_usuario:
-"¡Muy bien! ¿En qué puedo ayudarte?"
-
-
-"Gracias"
-
-→
-
-respuesta_usuario:
-"¡De nada! ¿Necesitas algo más?"
-
-
-No inventes herramientas para estas consultas.
-
+OPCIONAL (false): nunca se pregunta solo por estar ausente. Inclúyelo únicamente
+si el usuario lo da explícitamente, se deduce sin ambigüedad, o es necesario
+para expresar una condición que el usuario indicó. Un opcional ausente nunca
+deja una herramienta "incompleta" ni requiere confirmación.
 
 ============================================================
-2. HERRAMIENTAS
+2. INTERPRETAR LENGUAJE NATURAL
+============================================================
+Cantidad y orden:
+  "mi último pedido"        → cantidad=1, orden="fecha_desc"
+  "mis últimos 5 pedidos"   → cantidad=5, orden="fecha_desc"
+  "mi primer pedido"        → cantidad=1, orden="fecha_asc"
+  "los más recientes"       → orden="fecha_desc"
+  "los más antiguos"        → orden="fecha_asc"
+  "el pedido 12345"         → numero_pedido="12345"
+
+Orden — valores válidos: fecha_asc, fecha_desc, numero_asc, numero_desc.
+  "último(s)" / "más reciente(s)" → fecha_desc
+  "primero" / "más antiguo(s)"    → fecha_asc
+
+Fechas (usa {fecha_actual} como referencia, formato YYYY-MM-DD):
+  "hoy" → fecha_actual | "ayer" → fecha_actual-1
+  "esta semana" → intervalo de la semana actual
+  "el mes pasado" → intervalo del mes anterior
+
+Importes: "importe total" → importe_total | "importe base" → importe_base.
+Si dice solo "importe" y la herramienta distingue ambos, pregunta cuál quiere.
+
+Artículos de un pedido: si no se indica cantidad, asume cantidad=1 por artículo.
+  "un lápiz azul" → {{"articulo": "lápiz azul", "cantidad": 1}}
+  "10 lápices azules y 5 bolígrafos negros" →
+    {{"articulos": [
+        {{"articulo": "lápiz azul", "cantidad": 10}},
+        {{"articulo": "bolígrafo negro", "cantidad": 5}}
+    ]}}
+
+Nunca preguntes por algo deducible (cantidad, orden, estado, fechas,
+dirección, número de pedido, etc.) si ya puede inferirse de la petición.
+
+============================================================
+3. VISUALIZACIÓN vs. ACCIÓN
+============================================================
+Expresiones como "quiero ver", "muéstrame", "enséñame", "dime", "lista(r)",
+"quiero consultar/saber" indican que el usuario quiere información, pero NO
+implican forzosamente usar solo una herramienta de visualización: analiza qué
+herramienta necesita esos datos primero.
+
+============================================================
+4. CADENA DE HERRAMIENTAS
+============================================================
+Si una herramienta necesita como parámetro obligatorio el resultado de otra,
+incluye ambas, con la productora SIEMPRE antes que la consumidora.
+
+Si el usuario pide una acción sobre información aún no obtenida, primero
+busca esa información:
+  "Muéstrame mi último pedido"      → buscar_pedidos → visualizar_pedidos
+  "Descárgame mi último pedido"     → buscar_pedidos → descargar_pedidos
+  "Envíame mi último pedido"        → buscar_pedidos → enviar_email_pedidos
+
+============================================================
+5. MEMORIA Y CONTEXTO
+============================================================
+- Conserva siempre los parámetros ya recopilados; nunca los borres. Solo
+  actualízalos si el usuario pide explícitamente cambiar su valor.
+- Usa "resultado_tools" si ya contiene lo necesario: no repitas una búsqueda
+  cuyo resultado anterior ya resuelve la petición actual.
+- Interpreta referencias anafóricas ("el primero", "el segundo", "el último",
+  "ese", "esos", "aquel", "el anterior", "muéstrame ese", "descárgalo",
+  "envíamelo") contra el resultado anterior.
+
+============================================================
+6. CHECKLIST ANTES DE PREGUNTAR
+============================================================
+Solo preguntas si TODO esto es NO:
+1. ¿Se dio ya el valor en la petición?
+2. ¿Se puede deducir inequívocamente?
+3. ¿Está en el contexto?
+4. ¿Está en parámetros recopilados?
+5. ¿Está en resultado_tools?
+6. ¿Se puede obtener ejecutando una herramienta anterior?
+
+============================================================
+EJEMPLOS
 ============================================================
 
-Utiliza ÚNICAMENTE las herramientas definidas en
-HERRAMIENTAS.
-
-Identifica siempre las herramientas como:
-
-"dominio.herramienta"
-
-Ejemplo:
-
-[
-    "pedidos.buscar_pedidos",
-    "pedidos.visualizar_pedidos"
-]
-
-No inventes herramientas.
-
-No inventes parámetros.
-
-No inventes valores.
-
-No mezcles herramientas de diferentes dominios.
-
-
-============================================================
-3. PARÁMETROS
-============================================================
-
-Los parámetros deben agruparse por herramienta.
-
-Ejemplo:
-
+# "Quiero ver mi último pedido"
 {{
-    "pedidos.buscar_pedidos": {{
-        "cantidad": 5,
-        "estado": "cerrado"
-    }}
-}}
-
-Los parámetros opcionales pueden omitirse.
-
-Si una herramienta no necesita parámetros:
-
-{{
-    "pedidos.visualizar_pedidos": {{}}
-}}
-
-
-============================================================
-4. PARÁMETROS OBLIGATORIOS Y AMBIGÜEDADES
-============================================================
-
-Si falta un parámetro obligatorio O existe una ambigüedad
-que impide saber qué valor utilizar:
-
-- NO ejecutes herramientas.
-- Añade el dato a "parametros_a_pedir".
-- Pregunta únicamente lo necesario en "respuesta_usuario".
-- NO elijas un valor arbitrariamente.
-- NO supongas qué opción quiere el usuario.
-
-Si el usuario responde posteriormente a una pregunta,
-utiliza el historial para completar el parámetro pendiente.
-
-
-============================================================
-5. IMPORTES — REGLA PRIORITARIA
-============================================================
-
-ESTA REGLA TIENE PRIORIDAD SOBRE CUALQUIER OTRA REGLA
-DE INTERPRETACIÓN DE PARÁMETROS.
-
-La herramienta de pedidos dispone de DOS tipos de importe:
-
-- importe_total
-- importe_base
-
-Si el usuario dice explícitamente:
-
-"importe total"
-
-→ utiliza:
-
-"importe_total"
-
-
-Si el usuario dice explícitamente:
-
-"importe base"
-
-→ utiliza:
-
-"importe_base"
-
-
-MUY IMPORTANTE:
-
-Si el usuario dice únicamente:
-
-"importe"
-
-"con un importe de X"
-
-"pedidos por importe de X euros"
-
-"pedidos cuyo importe sea X"
-
-y NO especifica "total" ni "base":
-
-NO puedes decidir si se refiere a importe_total
-o importe_base.
-
-Debes pedir aclaración.
-
-
-Ejemplo:
-
-Usuario:
-
-"quiero ver mis últimos dos pedidos del año pasado
-con un importe de 200 euros"
-
-
-DEBES generar:
-
-{{
-    "herramientas": [],
+    "herramientas": ["pedidos.buscar_pedidos", "pedidos.visualizar_pedidos"],
     "parametros": {{
-        "pedidos.buscar_pedidos": {{
-            "cantidad": 2,
-            "importe": 200,
-            "fecha_desde": "2025-01-01",
-            "fecha_hasta": "2025-12-31",
-            "orden": "fecha_desc"
-        }}
-    }},
-    "parametros_a_pedir": [
-        "tipo_importe"
-    ],
-    "respuesta_usuario":
-        "¿Quieres filtrar por importe total o por importe base?"
-}}
-
-
-NO debes generar:
-
-"importe_total": 200
-
-ni:
-
-"importe_base": 200
-
-
-porque el usuario no ha especificado el tipo.
-
-El valor numérico SIEMPRE debe conservarse como:
-
-"importe": 200
-
-hasta que el usuario aclare el tipo.
-
-
-Cuando el usuario responda:
-
-"importe total"
-
-debes completar:
-
-{{
-    "herramientas": [
-        "pedidos.buscar_pedidos"
-    ],
-    "parametros": {{
-        "pedidos.buscar_pedidos": {{
-            "cantidad": 2,
-            "importe_total": 200,
-            "fecha_desde": "2025-01-01",
-            "fecha_hasta": "2025-12-31",
-            "orden": "fecha_desc"
-        }}
+        "pedidos.buscar_pedidos": {{"cantidad": 1, "orden": "fecha_desc"}},
+        "pedidos.visualizar_pedidos": {{"resultado": "RESULTADO_DE_pedidos.buscar_pedidos"}}
     }},
     "parametros_a_pedir": [],
     "respuesta_usuario": null
 }}
 
-
-============================================================
-6. DEPENDENCIAS ENTRE HERRAMIENTAS
-============================================================
-
-Si una herramienta necesita el resultado de otra,
-indícalo mediante:
-
-"<resultado_de_nombre_herramienta>"
-
-
-Ejemplo:
-
+# "Quiero ver mis pedidos" (sin cantidad → no preguntar)
 {{
-    "pedidos.buscar_pedidos": {{
-        "cantidad": 5
+    "herramientas": ["pedidos.buscar_pedidos", "pedidos.visualizar_pedidos"],
+    "parametros": {{
+        "pedidos.buscar_pedidos": {{}},
+        "pedidos.visualizar_pedidos": {{"resultado": "RESULTADO_DE_pedidos.buscar_pedidos"}}
     }},
-    "pedidos.visualizar_pedidos": {{
-        "resultado": "<resultado_de_pedidos.buscar_pedidos>"
-    }}
+    "parametros_a_pedir": [],
+    "respuesta_usuario": null
 }}
 
-
-============================================================
-7. ORDEN
-============================================================
-
-Utiliza SOLO estos valores:
-
-- fecha_asc
-- fecha_desc
-- numero_asc
-- numero_desc
-
-
-Si el usuario no indica orden,
-no incluyas el parámetro.
-
-
-Si indica:
-
-"últimos pedidos"
-
-interpreta normalmente como:
-
-"orden": "fecha_desc"
-
-
-============================================================
-8. FECHAS
-============================================================
-
-Todas las fechas deben devolverse como:
-
-YYYY-MM-DD
-
-
-Convierte expresiones relativas utilizando FECHA ACTUAL.
-
-
-Ejemplos:
-
-"hoy"
-
-→ fecha actual
-
-
-"ayer"
-
-→ día anterior
-
-
-"últimas dos semanas"
-
-→ rango correspondiente
-
-
-"año pasado"
-
-→
-
-fecha_desde:
-01/01/AAAA
-
-fecha_hasta:
-31/12/AAAA
-
-
-Nunca devuelvas expresiones relativas.
-
-
-============================================================
-9. LISTAS
-============================================================
-
-Si un parámetro admite varios valores,
-utiliza un array.
-
-
-Ejemplo:
-
+# "Quiero ver el pedido 12345"
 {{
-    "nombre_articulos": [
-        "balletas amarillas",
-        "balletas azules"
-    ]
+    "herramientas": ["pedidos.buscar_pedidos", "pedidos.visualizar_pedidos"],
+    "parametros": {{
+        "pedidos.buscar_pedidos": {{"numero_pedido": "12345"}},
+        "pedidos.visualizar_pedidos": {{"resultado": "RESULTADO_DE_pedidos.buscar_pedidos"}}
+    }},
+    "parametros_a_pedir": [],
+    "respuesta_usuario": null
 }}
 
+# "Envíame mi último pedido a juan@gmail.com"
+{{
+    "herramientas": ["pedidos.buscar_pedidos", "pedidos.enviar_email_pedidos"],
+    "parametros": {{
+        "pedidos.buscar_pedidos": {{"cantidad": 1, "orden": "fecha_desc"}},
+        "pedidos.enviar_email_pedidos": {{
+            "resultado": "RESULTADO_DE_pedidos.buscar_pedidos",
+            "email": "juan@gmail.com"
+        }}
+    }},
+    "parametros_a_pedir": [],
+    "respuesta_usuario": null
+}}
+# (si no da email y el parámetro es opcional → no preguntarlo)
+
+# "Quiero crear un pedido"
+# (forma_pago, direccion_envio y articulos son obligatorios y faltan)
+{{
+    "herramientas": ["pedidos.insertar_pedidos"],
+    "parametros": {{
+        "pedidos.insertar_pedidos": {{}}
+    }},
+    "parametros_a_pedir": ["forma_pago", "direccion_envio", "articulos"],
+    "respuesta_usuario": "¿Qué forma de pago quieres utilizar?"
+}}
+
+# Turno siguiente: usuario responde "Transferencia", luego "Calle Mayor 10"
+# → conservar lo recopilado y seguir preguntando el resto (articulos)
+{{
+    "herramientas": ["pedidos.insertar_pedidos"],
+    "parametros": {{
+        "pedidos.insertar_pedidos": {{
+            "forma_pago": "Transferencia",
+            "direccion_envio": "Calle Mayor 10"
+        }}
+    }},
+    "parametros_a_pedir": ["articulos"],
+    "respuesta_usuario": "¿Qué artículos quieres incluir en el pedido?"
+}}
 
 ============================================================
-10. RESPUESTA
+REGLAS ABSOLUTAS
 ============================================================
-
-Si se necesitan herramientas y NO falta información:
-
-"respuesta_usuario": null
-
-
-Si faltan datos o existe una ambigüedad:
-
-"respuesta_usuario": pregunta concreta al usuario
-
-
-Si es conversación normal:
-
-"respuesta_usuario": respuesta conversacional breve
-
-
-No ejecutes acciones.
-
-No describas resultados de herramientas.
-
-
-============================================================
-11. REFERENCIAS A RESULTADOS ANTERIORES
-============================================================
-
-La consulta puede contener referencias que ya hayan sido
-resueltas por el RESOLVEDOR DE CONTEXTO.
-
-Por ejemplo:
-
-"Descarga el pedido 2500002320"
-
-En ese caso debes utilizar:
-
-"2500002320"
-
-como parámetro de la herramienta correspondiente.
-
-
-Si la consulta contiene una referencia que sigue siendo
-ambigua y no existe información suficiente para resolverla:
-
-- NO inventes un valor.
-- Añade el parámetro correspondiente a
-  "parametros_a_pedir".
-- Pregunta al usuario.
-
-
-============================================================
-IMPORTANTE
-============================================================
-
-Devuelve SOLO JSON válido.
-
-NO devuelvas:
-
-- fecha_hora
-- error
-- tiempo
-- consulta_original
-- consulta_reescrita
-- explicaciones
-- markdown
+- Usa solo herramientas y parámetros existentes; no inventes ninguno.
+- Respeta estrictamente "obligatorio"; los opcionales nunca generan preguntas.
+- No preguntes nada deducible de la petición, el contexto, lo ya recopilado,
+  resultado_tools, o el resultado de una herramienta anterior en el plan.
+- Las herramientas se listan en orden de ejecución; la productora de un dato
+  va siempre antes que su consumidora.
+- Conserva los parámetros recopilados salvo cambio explícito del usuario.
+- Solo se pregunta UN parámetro obligatorio por turno.
+- Si no falta nada obligatorio: "parametros_a_pedir": [] y "respuesta_usuario": null.
+- Responde EXCLUSIVAMENTE con JSON válido, sin Markdown ni texto adicional.
 """)
 
-
-# =====================================================
-# CHAIN PLANNER
-# =====================================================
-
 planner_chain = planner_prompt | llm
+
+
+# =====================================================
+# GUARDAR RESPUESTA DEL PARÁMETRO
+# =====================================================
+
+def guardar_parametro(state: State): #guarda la respuesta del usuario
+
+    esperando = state.get( #comprobamos si estamos esperando un parametro
+        "esperando_parametro",
+        False
+    )
+
+    parametro = state.get( #traemos el parametro actual
+        "parametro_actual"
+    )
+
+    # -------------------------------------------------
+    # Si no estamos esperando ningún parámetro,
+    # no hacemos nada.
+    # -------------------------------------------------
+
+    if not esperando or not parametro:
+
+        return {}
+
+
+    messages = state.get( #obtenemos los mensajes (crea un pedido, que forma de pago,transferencia)
+        "messages",
+        []
+    )
+
+    if not messages:
+
+        return {}
+
+
+    # -------------------------------------------------
+    # RESPUESTA DEL USUARIO
+    # -------------------------------------------------
+
+    respuesta = messages[-1].content.strip() #obtenemos la respuesta
+
+
+    # -------------------------------------------------
+    # COPIAR PARÁMETROS RECOPILADOS
+    # -------------------------------------------------
+
+    parametros_recopilados = dict( #coge los parametros anteriores recopilados
+        state.get(
+            "parametros_recopilados",
+            {}
+        )
+    )
+
+
+    # -------------------------------------------------
+    # GUARDAR
+    # -------------------------------------------------
+
+    parametros_recopilados[parametro] = respuesta #añade el nuevo parametro con el resultado
+
+
+    # -------------------------------------------------
+    # QUITAR PARÁMETRO DE PENDIENTES
+    # -------------------------------------------------
+
+    parametros_faltantes = list(
+        state.get(
+            "parametros_faltantes",
+            []
+        )
+    )
+
+    if parametro in parametros_faltantes:
+
+        parametros_faltantes.remove(
+            parametro
+        )
+
+
+    # -------------------------------------------------
+    # SIGUIENTE PARAMETRO
+    # -------------------------------------------------
+
+    siguiente_parametro = (
+        parametros_faltantes[0]
+        if parametros_faltantes
+        else None
+    )
+
+
+    return { #Devuelve cambios al estado
+
+        "parametros_recopilados":
+            parametros_recopilados,
+
+        "parametros_faltantes":
+            parametros_faltantes,
+
+        "parametro_actual":
+            siguiente_parametro,
+
+        "esperando_parametro":
+            siguiente_parametro is not None
+    }
 
 
 # =====================================================
@@ -973,6 +735,11 @@ planner_chain = planner_prompt | llm
 # =====================================================
 
 def planner(state: State):
+
+    parametros_recopilados = state.get(
+        "parametros_recopilados",
+        {}
+    )
 
     response = planner_chain.invoke({
 
@@ -983,10 +750,15 @@ def planner(state: State):
             ),
 
         "question":
-            state["search_query"],
+            state.get(
+                "search_query",
+                ""
+            ),
 
         "fecha_actual":
-            datetime.now().strftime("%Y-%m-%d"),
+            datetime.now().strftime(
+                "%Y-%m-%d"
+            ),
 
         "resultado_tools":
             json.dumps(
@@ -995,6 +767,17 @@ def planner(state: State):
                     []
                 ),
                 ensure_ascii=False
+            ),
+
+        "parametros_recopilados":
+            json.dumps(
+                parametros_recopilados,
+                ensure_ascii=False
+            ),
+
+        "parametro_actual":
+            state.get(
+                "parametro_actual"
             )
     })
 
@@ -1014,7 +797,6 @@ def planner(state: State):
         "input_tokens",
         0
     )
-
 
     planner_output_tokens = usage.get(
         "output_tokens",
@@ -1079,8 +861,7 @@ def planner(state: State):
 
             f"Error: {e}\n\n"
 
-            f"Respuesta del modelo:\n"
-            f"{contenido}"
+            f"Respuesta del modelo:\n{contenido}"
         )
 
 
@@ -1090,7 +871,9 @@ def planner(state: State):
 
     try:
 
-        plan = Plan.model_validate(datos)
+        plan = Plan.model_validate(
+            datos
+        )
 
     except Exception as e:
 
@@ -1100,14 +883,41 @@ def planner(state: State):
 
             f"Error: {e}\n\n"
 
-            "JSON recibido:\n"
-
+            f"JSON recibido:\n"
             f"{json.dumps(datos, ensure_ascii=False, indent=2)}"
         )
 
 
     # =================================================
-    # TOKENS TOTALES
+    # PENDIENTES
+    # =================================================
+
+    parametros_faltantes = (
+        plan.parametros_a_pedir
+    )
+
+
+    # =================================================
+    # PRÓXIMO PARÁMETRO
+    # =================================================
+
+    if parametros_faltantes:
+
+        parametro_actual = (
+            parametros_faltantes[0]
+        )
+
+        esperando_parametro = True
+
+    else:
+
+        parametro_actual = None
+
+        esperando_parametro = False
+
+
+    # =================================================
+    # TOKENS
     # =================================================
 
     context_input_tokens = state.get(
@@ -1127,7 +937,6 @@ def planner(state: State):
         planner_input_tokens
     )
 
-
     total_output_tokens = (
         context_output_tokens
         +
@@ -1145,35 +954,73 @@ def planner(state: State):
             plan.model_dump(),
 
         "parametros_faltantes":
-            plan.parametros_a_pedir,
+            parametros_faltantes,
 
-        # Totales
-        "input_tokens":
-            total_input_tokens,
+        "parametro_actual":
+            parametro_actual,
 
-        "output_tokens":
-            total_output_tokens,
+        "esperando_parametro":
+            esperando_parametro,
 
-        # Tokens individuales
-        "context_input_tokens":
-            context_input_tokens,
-
-        "context_output_tokens":
-            context_output_tokens,
+        "respuesta_parametro":
+            plan.respuesta_usuario,
 
         "planner_input_tokens":
             planner_input_tokens,
 
         "planner_output_tokens":
-            planner_output_tokens
+            planner_output_tokens,
+
+        "input_tokens":
+            total_input_tokens,
+
+        "output_tokens":
+            total_output_tokens
     }
+
+
+# =====================================================
+# DECISIÓN INICIAL
+# =====================================================
+
+def decidir_inicio(state: State): #decide si context_resolver o guardar_parametro
+
+    if state.get(
+        "esperando_parametro",
+        False
+    ):
+
+        return "guardar_parametro"
+
+    return "context_resolver"
+
+# =====================================================
+# FINALIZAR OPERACION
+# =====================================================
+def decidir_despues_planner(state: State):
+
+    if state.get("esperando_parametro", True):
+        return "fin"
+
+    return "finalizar_operacion"
+
+def finalizar_operacion(state):
+
+    return {
+        "parametros_faltantes": [],
+        "parametros_recopilados": {},
+        "parametro_actual": None,
+        "esperando_parametro": False,
+        "respuesta_parametro": None
+    }
+
 
 
 # =====================================================
 # GRAFO
 # =====================================================
 
-graph = StateGraph(
+graph = StateGraph( #Creamos el grafo
     State
 )
 
@@ -1181,6 +1028,11 @@ graph = StateGraph(
 # =====================================================
 # NODOS
 # =====================================================
+
+graph.add_node(
+    "guardar_parametro",
+    guardar_parametro
+)
 
 graph.add_node(
     "context_resolver",
@@ -1192,15 +1044,46 @@ graph.add_node(
     planner
 )
 
+graph.add_node(
+    "finalizar_operacion",
+    finalizar_operacion
+)
+
 
 # =====================================================
-# FLUJO
+# INICIO CONDICIONAL
+# =====================================================
+#ejecuta decidir_inicio() para decidir qué nodo ejecutar si guardar_parametro o context_resolver
+graph.add_conditional_edges(
+
+    START,
+
+    decidir_inicio,
+
+    {
+
+        "guardar_parametro":
+            "guardar_parametro",
+
+        "context_resolver":
+            "context_resolver"
+    }
+)
+
+
+# =====================================================
+# GUARDAR → CONTEXTO
 # =====================================================
 
 graph.add_edge(
-    START,
+    "guardar_parametro",
     "context_resolver"
 )
+
+
+# =====================================================
+# CONTEXTO → PLANNER
+# =====================================================
 
 graph.add_edge(
     "context_resolver",
@@ -1208,10 +1091,22 @@ graph.add_edge(
 )
 
 
-graph.add_edge(
+# =====================================================
+# PLANNER → FIN
+# =====================================================
+
+graph.add_conditional_edges(
     "planner",
-    END
+
+    decidir_despues_planner,
+
+    {
+        "finalizar_operacion": "finalizar_operacion",
+        "fin": END
+    }
 )
+
+
 
 
 # =====================================================
@@ -1256,10 +1151,6 @@ def guardar_resultado_memoria(
 
     try:
 
-        # =============================================
-        # CONFIGURACIÓN DEL THREAD
-        # =============================================
-
         config = {
 
             "configurable": {
@@ -1269,10 +1160,6 @@ def guardar_resultado_memoria(
             }
         }
 
-
-        # =============================================
-        # GUARDAR RESULTADO
-        # =============================================
 
         graph_app.update_state(
 
@@ -1285,10 +1172,6 @@ def guardar_resultado_memoria(
             }
         )
 
-
-        # =============================================
-        # COMPROBAR QUE SE HA GUARDADO
-        # =============================================
 
         estado = graph_app.get_state(
             config
@@ -1340,9 +1223,9 @@ def create_plan(
 
     try:
 
-        # =============================================
-        # CONFIGURACIÓN
-        # =============================================
+        # =================================================
+        # CONFIGURACIÓN THREAD
+        # =================================================
 
         config = {
 
@@ -1354,9 +1237,9 @@ def create_plan(
         }
 
 
-        # =============================================
+        # =================================================
         # EJECUTAR GRAFO
-        # =============================================
+        # =================================================
 
         resultado = graph_app.invoke(
 
@@ -1368,15 +1251,16 @@ def create_plan(
                         content=data.text
                     )
                 ]
+
             },
 
             config=config
         )
 
 
-        # =============================================
+        # =================================================
         # TIEMPO
-        # =============================================
+        # =================================================
 
         tiempo = round(
 
@@ -1387,45 +1271,53 @@ def create_plan(
         )
 
 
-        # =============================================
-        # PLAN
-        # =============================================
+        # =================================================
+        # DATOS
+        # =================================================
 
         plan = resultado.get(
-
             "plan",
-
             {}
         )
 
 
-        # =============================================
-        # PARÁMETROS FALTANTES
-        # =============================================
-
         parametros_faltantes = resultado.get(
-
             "parametros_faltantes",
-
             []
         )
 
 
-        # =============================================
-        # CONSULTA REESCRITA
-        # =============================================
-
         consulta_reescrita = resultado.get(
-
             "search_query",
-
             ""
         )
 
 
-        # =============================================
+        respuesta_parametro = resultado.get(
+            "respuesta_parametro"
+        )
+
+
+        parametros_recopilados = resultado.get(
+            "parametros_recopilados",
+            {}
+        )
+
+
+        esperando_parametro = resultado.get(
+            "esperando_parametro",
+            False
+        )
+
+
+        parametro_actual = resultado.get(
+            "parametro_actual"
+        )
+
+
+        # =================================================
         # TOKENS
-        # =============================================
+        # =================================================
 
         context_input_tokens = resultado.get(
             "context_input_tokens",
@@ -1464,45 +1356,46 @@ def create_plan(
         )
 
 
-        # =============================================
-        # RESPUESTA FINAL
-        # =============================================
+        # =================================================
+        # RESPUESTA
+        # =================================================
 
         respuesta = {
 
             "fecha_hora":
-
                 datetime.now().strftime(
                     "%Y-%m-%d %H:%M:%S"
                 ),
 
             "error":
-
                 False,
 
             "tiempo":
-
                 tiempo,
 
             "consulta_original":
-
                 data.text,
 
             "consulta_reescrita":
-
                 consulta_reescrita,
 
             "plan":
-
                 plan,
 
             "parametros_a_pedir":
-
                 parametros_faltantes,
 
-            # =========================================
-            # TOKENS
-            # =========================================
+            "parametros_recopilados":
+                parametros_recopilados,
+
+            "parametro_actual":
+                parametro_actual,
+
+            "esperando_parametro":
+                esperando_parametro,
+
+            "respuesta_usuario":
+                respuesta_parametro,
 
             "tokens":
 
@@ -1526,7 +1419,6 @@ def create_plan(
                                 )
                         },
 
-
                     "planner":
 
                         {
@@ -1545,7 +1437,6 @@ def create_plan(
                                 )
                         },
 
-
                     "total":
 
                         {
@@ -1563,9 +1454,9 @@ def create_plan(
         }
 
 
-        # =============================================
-        # GUARDAR LOG
-        # =============================================
+        # =================================================
+        # LOG
+        # =================================================
 
         ruta_archivo = os.path.join(
 
@@ -1599,18 +1490,10 @@ def create_plan(
             )
 
 
-        # =============================================
-        # DEVOLVER
-        # =============================================
-
         return respuesta
 
 
     except Exception as e:
-
-        # =============================================
-        # TIEMPO
-        # =============================================
 
         tiempo = round(
 
@@ -1621,10 +1504,6 @@ def create_plan(
         )
 
 
-        # =============================================
-        # RESPUESTA ERROR
-        # =============================================
-
         respuesta_error = {
 
             "fecha_hora":
@@ -1634,22 +1513,15 @@ def create_plan(
                 ),
 
             "error":
-
                 True,
 
             "tiempo":
-
                 tiempo,
 
             "mensaje":
-
                 str(e)
         }
 
-
-        # =============================================
-        # GUARDAR ERROR
-        # =============================================
 
         ruta_archivo = os.path.join(
 
@@ -1682,9 +1554,5 @@ def create_plan(
                 ) + "\n"
             )
 
-
-        # =============================================
-        # DEVOLVER ERROR
-        # =============================================
 
         return respuesta_error
