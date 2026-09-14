@@ -487,6 +487,37 @@ Artículos de un pedido: si no se indica cantidad, asume cantidad=1 por artícul
 Nunca preguntes por algo deducible (cantidad, orden, estado, fechas,
 dirección, número de pedido, etc.) si ya puede inferirse de la petición.
 
+Paginación ("más pedidos", "los siguientes", "el resto"):
+  ultimo_pedido SOLO debe rellenarse cuando el usuario pide EXPLÍCITAMENTE
+  continuar una búsqueda anterior, con expresiones como:
+    - "muéstrame más"
+    - "los siguientes"
+    - "el resto de pedidos"
+    - "sigue mostrando"
+    - "y más"
+    - "continúa"
+  En ese caso:
+    ultimo_pedido = número del último pedido devuelto en la búsqueda
+    anterior (el último elemento de resultado_tools, según el orden usado).
+
+  EN CUALQUIER OTRO CASO, ultimo_pedido debe quedar VACÍO (no incluirlo
+  en "parametros"), aunque exista una búsqueda anterior en resultado_tools.
+  Por ejemplo, las siguientes peticiones NUNCA deben llevar ultimo_pedido,
+  incluso si hay resultados anteriores disponibles:
+    - "quiero ver mis pedidos"
+    - "mi último pedido"
+    - "mis últimos 5 pedidos"
+    - "pedidos del mes pasado"
+    - "el pedido 12345"
+    - "quiero crear un nuevo pedido"
+  Es decir: la sola EXISTENCIA de resultado_tools NO es motivo para
+  rellenar ultimo_pedido. Solo la intención explícita de paginar/continuar
+  lo activa.
+
+  No preguntes nunca por "ultimo_pedido" directamente al usuario: se
+  rellena de forma automática solo en el caso de paginación, y si no hay
+  una búsqueda anterior de la que partir, simplemente no lo incluyas.
+
 ============================================================
 3. VISUALIZACIÓN vs. ACCIÓN
 ============================================================
@@ -506,6 +537,14 @@ busca esa información:
   "Muéstrame mi último pedido"      → buscar_pedidos → visualizar_pedidos
   "Descárgame mi último pedido"     → buscar_pedidos → descargar_pedidos
   "Envíame mi último pedido"        → buscar_pedidos → enviar_email_pedidos
+
+Si "pedidos.buscar_pedidos" incluye un parámetro "orden" y en la cadena
+también se usa "visualizar_pedidos", "descargar_pedidos" o
+"enviar_email_pedidos", propaga el MISMO valor de "orden" a esa
+herramienta consumidora, para que muestre/descargue/envíe los pedidos
+en el mismo orden en que se buscaron. No lo preguntes: dedúcelo siempre
+de "orden" usado en buscar_pedidos (o de su valor por defecto si el
+usuario no especificó ninguno).
 
 ============================================================
 5. MEMORIA Y CONTEXTO
