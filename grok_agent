@@ -7,12 +7,28 @@ from langgraph.graph.message import add_messages
 from langchain_core.messages import HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
+import tempfile
+from fastapi.responses import FileResponse
 
 from pydantic import BaseModel, Field
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from datetime import datetime
+from langchain_google_genai import ChatGoogleGenerativeAI
+from fastapi import FastAPI, UploadFile, File
+from faster_whisper import WhisperModel
+
+from fastapi.responses import Response
+from pydantic import BaseModel
+from google.cloud import texttospeech
+import edge_tts
+# from piper import PiperVoice
+# import wave
+from fastapi import HTTPException
+
+from kokoro import KPipeline
+import soundfile as sf
 
 from AI_Conversacional_TG.API.herramientas import HERRAMIENTAS
 
@@ -27,6 +43,34 @@ import time
 
 app = FastAPI()
 
+BASE_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
+# =====================================================
+# KOKORO TTS
+# =====================================================
+
+tts_pipeline = KPipeline(
+    lang_code="e"
+)
+
+TTS_VOICE = "ef_dora"
+
+# PIPER_MODEL = os.path.join(
+#     BASE_DIR,
+#     "modelos",
+#     "piper",
+#     "es_ES-davefx-medium.onnx"
+# )
+
+# voice = PiperVoice.load(PIPER_MODEL)
+
+model = WhisperModel(
+    "small",
+    device="cpu",
+    compute_type="int8"
+)
+
 
 # =====================================================
 # CONFIGURACIÓN LLM
@@ -34,15 +78,15 @@ app = FastAPI()
 
 load_dotenv()
 
-api_key = os.getenv("GROQ_API_KEY")
+api_key = os.getenv("GROQ_API_KEY2")
 
 if not api_key:
-    raise RuntimeError("No se ha encontrado GROQ_API_KEY")
+    raise RuntimeError("No se ha encontrado GEMINI_API_KEY")
 
 
 llm = ChatGroq(
     model="openai/gpt-oss-120b",
-    api_key=api_key
+    api_key=api_key,
 )
 
 
@@ -146,7 +190,6 @@ Debes resolver referencias como:
 - "el siguiente"
 - "ese pedido"
 - "ese"
-- "esa forma de pago"
 - "esa dirección"
 - "descárgalo"
 - "descárgame ese"
@@ -174,7 +217,6 @@ operación independiente.
 
 NO copies automáticamente:
 
-- forma_pago
 - direccion_envio
 - articulos
 - cliente
@@ -341,7 +383,14 @@ def context_resolver(state: State):  #recibe el estado actual y resuelve el cont
     # CONSULTA REESCRITA
     # =================================================
 
-    consulta_reescrita = response.content.strip()
+    if isinstance(response.content, str):
+        consulta_reescrita = response.content.strip()
+    else:
+        consulta_reescrita = "".join(
+            bloque.get("text", "")
+            for bloque in response.content
+            if isinstance(bloque, dict)
+        ).strip()
 
     # =================================================
     # DEVOLVER
@@ -621,14 +670,14 @@ EJEMPLOS
 # (si no da email y el parámetro es opcional → no preguntarlo)
 
 # "Quiero crear un pedido"
-# (forma_pago, direccion_envio y articulos son obligatorios y faltan)
+# (direccion_envio y articulos son obligatorios y faltan)
 {{
     "herramientas": ["pedidos.insertar_pedidos"],
     "parametros": {{
         "pedidos.insertar_pedidos": {{}}
     }},
-    "parametros_a_pedir": ["forma_pago", "direccion_envio", "articulos"],
-    "respuesta_usuario": "¿Qué forma de pago quieres utilizar?"
+    "parametros_a_pedir": ["direccion_envio", "articulos"],
+    "respuesta_usuario": "¿Qué direccion de envio quieres utilizar?"
 }}
 
 # Turno siguiente: usuario responde "Transferencia", luego "Calle Mayor 10"
@@ -637,7 +686,6 @@ EJEMPLOS
     "herramientas": ["pedidos.insertar_pedidos"],
     "parametros": {{
         "pedidos.insertar_pedidos": {{
-            "forma_pago": "Transferencia",
             "direccion_envio": "Calle Mayor 10"
         }}
     }},
@@ -847,7 +895,14 @@ def planner(state: State):
     # CONTENIDO
     # =================================================
 
-    contenido = response.content.strip()
+    if isinstance(response.content, str):
+        contenido = response.content.strip()
+    else:
+        contenido = "".join(
+            bloque.get("text", "")
+            for bloque in response.content
+            if isinstance(bloque, dict)
+        ).strip()
 
 
     # =================================================
@@ -1177,6 +1232,9 @@ class MemoryRequest(BaseModel):
     thread_id: str
 
     resultado_tools: Any
+
+class TTSRequest(BaseModel):
+    texto: str
 
 
 # =====================================================
@@ -1595,3 +1653,97 @@ def create_plan(
 
 
         return respuesta_error
+
+@app.post("/tts")
+async def text_to_speech(request: TTSRequest):
+
+    if not request.texto.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="El texto está vacío"
+        )
+
+    archivo = tempfile.NamedTemporaryFile(
+        delete=False,
+        suffix=".wav"
+    )
+    archivo.close()
+
+    try:
+
+        # =================================================
+        # GENERAR AUDIO CON KOKORO
+        # =================================================
+
+        generator = tts_pipeline(
+            request.texto,
+            voice=TTS_VOICE
+        )
+
+        # =================================================
+        # GUARDAR AUDIO
+        # =================================================
+
+        with sf.SoundFile(
+            archivo.name,
+            mode="w",
+            samplerate=24000,
+            channels=1,
+            subtype="PCM_16"
+        ) as wav_file:
+
+            for _, _, audio in generator:
+
+                wav_file.write(
+                    audio.numpy()
+                )
+
+        # =================================================
+        # DEVOLVER AUDIO
+        # =================================================
+
+        return FileResponse(
+            archivo.name,
+            media_type="audio/wav",
+            filename="respuesta.wav"
+        )
+
+    except Exception as e:
+
+        if os.path.exists(archivo.name):
+            os.remove(archivo.name)
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error generando audio: {str(e)}"
+        )
+
+@app.post("/stt")
+async def stt(audio: UploadFile = File(...)):
+
+    extension = os.path.splitext(audio.filename)[1] or ".wav"
+
+    with tempfile.NamedTemporaryFile(
+        delete=False,
+        suffix=extension
+    ) as f:
+
+        f.write(await audio.read())
+        audio_path = f.name
+
+    try:
+        segments, info = model.transcribe(
+            audio_path,
+            language="es"
+        )
+
+        texto = " ".join(
+            segment.text for segment in segments
+        )
+
+        return {
+            "texto": texto.strip()
+        }
+
+    finally:
+        os.remove(audio_path)
